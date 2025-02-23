@@ -12,6 +12,7 @@ const addUser = (socket) => {
     const userId = uuid()
     userIdToWebSocket.set(userId, socket)
     webSocketToUserId.set(socket, userId)
+    socket.send(JSON.stringify({ type : "userId", userId }))
     console.log(`new user : ${userId}`)
 }
 
@@ -20,14 +21,23 @@ const removeUser = (socket) => {
     if(rooms.has(userId)) {
         const members = rooms.get(userId)
         members.map(memberId => {
-            const memberSock = userIdToWebSocket(memberId)
-            memberSock.send(JSON.stringify({ error : "room disconnected" }))
+            const memberSock = userIdToWebSocket.get(memberId)
+            memberSock?.send(JSON.stringify({ type : 'disconnected' }))
         })
-        rooms.delete(userId)
-    }
-    if(userId) {
         userIdToWebSocket.delete(userId)
         webSocketToUserId.delete(socket)
+        rooms.delete(userId) //update remove member from array
+        console.log(`host ${userId} disconnected`) 
+    } else if(userId) {
+        userIdToWebSocket.delete(userId)
+        webSocketToUserId.delete(socket)
+        console.log(`member ${userId} disconnected`)
+
+        const host = memberIdToRooms.get(userId)
+        rooms.get(host)?.filter(memberId => memberId !== userId)
+        const hostSocket = userIdToWebSocket.get(host)
+
+        hostSocket?.send(JSON.stringify({ type : 'disconnected', memberId : userId }))
     }
 }
 
@@ -42,29 +52,32 @@ const joinRoom = (memberSocket, hostId) => {
     if(!rooms.has(hostId)) {
         return memberSocket.send(JSON.stringify({ error : "invalid id" }))
     }
-    rooms.get(hostId).push(memberId)
+    if(!rooms.get(hostId)) {
+        rooms.set(hostId, [memberId])
+    } else {   
+        rooms.get(hostId).push(memberId)
+    }
     memberIdToRooms.set(memberId, hostId)
     console.log(`member ${memberId} joined room ${hostId}`)
 }
 
 const sendAnswer = (hostSocket, message) => { // message = {type="create-answer", answer} 
-    if(!message.answer ) {
-        return hostSocket.send("must include answer and memberId")
+    if(!message.answer) {
+        return hostSocket.send(JSON.stringify({error : "must include answer and memberId"}))
     }
     const hostId = webSocketToUserId.get(hostSocket)
-    const memberId = rooms.get(hostId)[0]
-    const memberSocket = userIdToWebSocket.get(memberId)
+    const memberSocket = userIdToWebSocket.get(message.memberId)
     memberSocket.send(JSON.stringify({ type : "create-answer", answer : message.answer }))
-    console.log(`answer ${message.answer} sent from ${hostId} to ${memberId}`)
+    console.log(`answer ${message.answer} sent from ${hostId} to ${message.memberId}`)
 }
 
 const exchangeCandidate = (socket, message) => {
-    if(!message.id) {
-        return socket.send(JSON.stringify({ error : "must send id" }))
+    if(!message.targetId) {
+        return socket.send(JSON.stringify({ error : "must include target id" }))
     }
-    const endUserSocket = userIdToWebSocket.get(message.id)
+    const endUserSocket = userIdToWebSocket.get(message.targetId)
     if(!endUserSocket) {
-        return socket.send(JSON.stringify({ error : "invalid id" }))
+        return socket.send(JSON.stringify({ error : "invalid target id" }))
     }
     if(!message.candidate) {
         return socket.send(JSON.stringify({ error : "must include candidates" }))
@@ -85,7 +98,7 @@ wss.on("connection", (ws) => {
         removeUser(ws)
     })
 
-    ws.on("message", (data ) => {
+    ws.on("message", (data) => {
         const message  = JSON.parse(data)
         if(message.type === "create-room") {
             const hostId = createRoom(ws)
@@ -94,8 +107,14 @@ wss.on("connection", (ws) => {
         } 
         else if(message.type === "join-room") { 
             const hostId = message.hostId 
+            if(!hostId) {
+                return ws.send(JSON.stringify({ error : "message should include hostId" }))
+            }
             joinRoom(ws, hostId)
             const hostSocket = userIdToWebSocket.get(hostId)
+            if(!hostSocket) {
+                return ws.send(JSON.stringify({ error : "invalid room" }));
+            }
             const memberId = webSocketToUserId.get(ws)
             if(!message.offer) {
                 return ws.send(JSON.stringify({ error : "must send offer" }))
@@ -105,7 +124,7 @@ wss.on("connection", (ws) => {
         }
         else if(message.type === "create-answer") {
             sendAnswer(ws, message)
-        } else if(message.type === "ice-candidates") {
+        } else if(message.type === "ice-candidate") {
             exchangeCandidate(ws, message)
         } else {
             ws.send(JSON.stringify({ error : "invalid message type" }))
